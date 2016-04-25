@@ -1,8 +1,8 @@
 /*
- * "Copyright (c) 2007 Washington University in St. Louis.
+ * "Copyright (c) 2016 University of Pittsburgh
  * All rights reserved.
  * @author Wenchen Wang
- * @date $Date: 2014/10/17
+ * @date $Date: 2016/04/13
  */
 
 #define _GNU_SOURCE
@@ -55,10 +55,11 @@ implementation {
 		MAXCHILDREN = 7,
 		TOTALNODES=55,
 		NUM_MEASUREMENTS=9,
-		SAMPLE_TIMES=50,
+		//SAMPLE_TIMES=20,
 		ROOT1=50,
-		//MAXCHILDPARENTS=11,
-		
+		//REDUCE_THRESHOLD=15,
+		REDUCE_INTERVALS=15,
+
 	};
 
 	typedef nx_struct logentry_t{
@@ -66,6 +67,8 @@ implementation {
     	TestNetworkMsg ONE saved_data[MAXCHILDREN];
     	nx_uint8_t ONE handled_saved_data[MAXCHILDREN];
     	nx_uint8_t ONE prob_bit[MAXCHILDREN];
+    	nx_uint8_t ONE child_dead_candidate[MAXCHILDREN];
+    	//nx_uint8_t ONE sibling_dead_candidate[MAXCHILDREN];
     	nx_uint8_t len;
     	message_t msg; 
   	}logentry_t;
@@ -81,7 +84,7 @@ implementation {
   	uint8_t isSibling=0;
   	uint8_t self_pos=0;
 
-  	uint8_t receiving_num=0;
+  	//uint8_t receiving_num=0;
   	uint8_t totalChildren=0;
   	uint8_t totalParents=0;
 
@@ -102,6 +105,8 @@ implementation {
 
   	FILE * topo_fp;
 
+  	uint8_t starter[12]={1, 7, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50};
+
   	uint8_t res_list[NUM_MEASUREMENTS] = {0, 0, 0, 0, 0, 0, 0, 0, 0}; // 9 sensor results for root nodes
 
   	uint8_t delay_list[NUM_MEASUREMENTS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -109,6 +114,8 @@ implementation {
 
 
   	uint8_t send_counter=0;
+
+  	uint8_t is_primary=0;
 
   	uint8_t rev_counter=0;
 
@@ -127,13 +134,36 @@ implementation {
 
 	uint8_t schedule_counter[12];
 
+	//uint8_t node_adjustment=0;  // 0: no adjustment; 1: add; 2:reduce
+
 	uint8_t up_schedule[12][12];
+
+	uint8_t max_schedule[12]={6, 7, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1};
+
+	//uint8_t curr_schedule_counter[12];
+
+	uint8_t avg_prob=0;
 
 	uint8_t node_list[50];
 
 	uint8_t schedule_len = 0;
 
-	uint8_t num_intervals = 0;
+	uint8_t num_lost_intervals = 0;
+
+	// network reconfiguration algorithm parameters
+
+	uint8_t measurements_received=0;
+	float curr_delay=0.0;
+	float pre_delay=0.0;
+	float pre_network_delay=0.0;
+	float curr_network_delay=0.0;
+	uint8_t change_network_flag=0;
+
+	uint8_t num_receving_intervals=0;
+
+	float ADD_THRESHOLD=0.2;
+	float DEADLINE=0.6;
+	float NETWORK_SAMPLE_RATE=0.1;
 
 	uint32_t superframe_length = 55; //Real superframe length + 1, to make sure we slot 54 after "%, the mod" processing
 	
@@ -147,6 +177,16 @@ implementation {
 	void generateSchedule();
 
 	int find_delay(int node);
+
+	int find_scounter(int primary_node);
+
+	void generateOnlineTopo();
+
+	int read_update_file();
+
+	int read_rev_file();
+
+
 	
 	command error_t Init.init() {		
 		//printf("hello!!!!\n");
@@ -171,9 +211,7 @@ implementation {
 
 		readTopoFile();
 
-
 		up_schedule[schedule_len][MAXLEVELNODE+1];
-
 
 		generateSchedule();
 
@@ -195,6 +233,14 @@ implementation {
 			m_entry.prob_bit[i] = 7;
 		}
 
+		/*for(i=0; i<MAXCHILDREN; i++){
+			m_entry.sibling_dead_candidate[i] = 1;
+		}*/
+
+		for(i=0; i<MAXCHILDREN; i++){
+			m_entry.child_dead_candidate[i] = 0;
+		}
+
 		for(i=0; i<schedule_len; i++){
 			for(j=1; j<=up_schedule[i][0]; j++){
 				if(TOS_NODE_ID == up_schedule[i][j]){
@@ -204,7 +250,6 @@ implementation {
 					if(i!=0){
 						log_payload->totalChildren=up_schedule[i-1][0];
 						totalChildren=log_payload->totalChildren;
-						//printf("Node %d totalChildren: %d\n", totalChildren);
 						for(k=1; k<=up_schedule[i-1][0]; k++){
 							log_payload->children[k-1]=up_schedule[i-1][k];
 							//printf("Node %d children %d\n", (TOS_NODE_ID%500), log_payload->children[k-1]);
@@ -254,10 +299,12 @@ implementation {
 
 					if(j==1){
 						log_payload->i_am_primary=1;
+						is_primary=1;
 					}else{
 						log_payload->i_am_primary=0;
+						is_primary=0;
 					}
-					//printf("node %d i_am_primary: %d\n", (TOS_NODE_ID%500), log_payload->i_am_primary);
+					printf("node %d i_am_primary: %d, is_primary\n", (TOS_NODE_ID%500), log_payload->i_am_primary, is_primary);
 
 				}
 
@@ -319,6 +366,14 @@ implementation {
  		message_t *tmpToSend;
  		uint8_t tmpToSendLen;
  		uint8_t i;
+ 		uint8_t scounter;
+ 		float add_reduce_counter;
+ 		FILE *topo_update_log;
+ 		FILE *rev_situation_fp;
+ 		int node_adjustment;
+ 		int ret;
+ 		int dead_node_num=0;
+ 		float delay_cal=0.0;
 
  		//printf("i am node %d at slot %d begining\n", TOS_NODE_ID, slot);
  		
@@ -372,9 +427,10 @@ implementation {
 
  				//reset nodes merged data and curr_num of m_entry
 				reset_parameters();
+				printf("reset parameters!!!!!!!!!!!!!!!!!!\n");
 				if(TOS_NODE_ID == ROOT1){
 					for(i=0; i<NUM_MEASUREMENTS; i++){
-						//printf("res_list: %d\n", res_list[i]);
+						printf("res_list: %d\n", res_list[i]);
 
 					}
 
@@ -384,11 +440,11 @@ implementation {
  			}else if(TOS_NODE_ID!=0 && slot%(TOTALNODES+1)-1 == TOS_NODE_ID){
 
  				// means I already finished receiving all children messages
-              	if(TOS_NODE_ID <= ROOT1 && TOS_NODE_ID!=1 && TOS_NODE_ID!=2 && TOS_NODE_ID!=3 && TOS_NODE_ID!=4 && TOS_NODE_ID!=5 && TOS_NODE_ID!=6){
+              	if(TOS_NODE_ID <= ROOT1 && TOS_NODE_ID >=7){
 
               		for(i=0; i<log_payload->totalChildren; i++){
               			//printf("node %d payload children receive: %d\n", TOS_NODE_ID, log_payload->childrenReceive[i]);
-              			if(log_payload->childrenReceive[i] == 0 && m_entry.prob_bit[i] >0){
+              			if(log_payload->childrenReceive[i] == 0 && m_entry.prob_bit[i]>0){
               				m_entry.prob_bit[i] --;
 
               			}
@@ -399,35 +455,54 @@ implementation {
 
               	}
 
-              	num_intervals++;
 
-              	if(num_intervals == SAMPLE_TIMES){
 
-					// add nodes according to prob_bits
-
-					// reset prob_bits
-					for(i=0; i<MAXCHILDREN; i++){
-						m_entry.prob_bit[i]=7;
-					}
-				}
+              	
 
  				// broadcast messages
  				call CC2420Config.setChannel(22);
   				call CC2420Config.sync();
   				call AMPacket.setDestination(&(m_entry.msg), AM_BROADCAST_ADDR);
-  				log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
-  				log_payload->source = TOS_NODE_ID;
+  				//log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
+  				//log_payload->source = TOS_NODE_ID;
+
+              	// copy prob_bit to the message
+  				for(i=0; i<MAXCHILDREN; i++){
+  					log_payload->my_children_prob_bit[i] = m_entry.prob_bit[i];
+  					//printf("Node %d log_payload: %d\n", TOS_NODE_ID, log_payload->my_children_prob_bit[i]);
+  				}
+
+  				log_payload->source= TOS_NODE_ID;
+
 	  			call SubSend.send(&(m_entry.msg), sizeof(TestNetworkMsg));
 
 	  			send_counter++;
-	  			//printf("------------------------------------------Node %d broadcast messages successfully-------------------------------\n", (TOS_NODE_ID%500));
+	  			printf("------------------------------------------Node %d broadcast messages successfully-------------------------------\n", (TOS_NODE_ID%500));
 
+	  			delay_cal=0.0;
 	  			if(TOS_NODE_ID == ROOT1){
-	  				  //printf("ROOT1: %d\n", ROOT1);
-				      //printf("setTCPMSG 1: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
+	  				  printf("ROOT1: %d\n", ROOT1);
+				      printf("setTCPMSG 1: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
 				      call SimMote.setTcpMsg(ROOT1, res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
 
-				      //printf("delay list: %d %d %d %d %d %d %d %d %d\n", delay_list[0], delay_list[1], delay_list[2], delay_list[3], delay_list[4], delay_list[5], delay_list[6], delay_list[7], delay_list[8]);
+				      // only calculate the first three meansurments for one heat exchanger
+				      for(i=0; i<3; i++){
+				      	if(res_list[i] >= 1){
+				      		measurements_received +=1;
+				      	}
+				      	delay_cal += (float)delay_list[i]/100;
+				      }
+
+				      // average measurment delay
+				      curr_network_delay = delay_cal/3;
+				      printf("average network delay: %f\n", curr_network_delay);
+				      printf("measurement received: %d\n", measurements_received);
+
+				      rev_situation_fp = fopen("/Users/wangwenchen/github/paper2_experiment/received_situation.txt", "a");
+					  fprintf(rev_situation_fp, "%d %f\n", measurements_received, curr_network_delay);
+					  fclose(rev_situation_fp);
+
+				      printf("delay list: %d %d %d %d %d %d %d %d %d\n", delay_list[0], delay_list[1], delay_list[2], delay_list[3], delay_list[4], delay_list[5], delay_list[6], delay_list[7], delay_list[8]);
 
 				      delay_fp=fopen("delay.txt", "a");
 
@@ -441,47 +516,142 @@ implementation {
 
 
  			}else if(TOS_NODE_ID!=0 && slot%(TOTALNODES+1)-2==ROOT1){
+ 				
+ 				 //network reconfiguration algorithm
+ 				 read_rev_file();
+ 				 //printf("node %d received_measurement: %d, curr_network_delay: %f\n", TOS_NODE_ID, measurements_received, curr_network_delay);
+ 				if(measurements_received == 0){ // lost messages
+
+ 					// increase num_lost_intervals
+ 					num_lost_intervals++;
+
+ 					//printf("node %d curr_network_delay: %f\n", TOS_NODE_ID, curr_network_delay);
+ 					curr_delay= pre_delay+(curr_network_delay-pre_network_delay)+NETWORK_SAMPLE_RATE;
+ 					printf("curr_delay: %f\n", curr_delay);
+ 					if (DEADLINE-curr_delay <= ADD_THRESHOLD){
+ 						// network node failure detection
+ 						if(is_primary==1 && log_payload->totalSiblings == 1){
+ 							for(i=0; i< log_payload->totalChildren; i++){
+ 								printf("num_lost_intervals: %d\n", num_lost_intervals);
+ 								printf("lost prob_bit: %d\n", 7-(m_entry.prob_bit[i]));
+ 								if(m_entry.prob_bit[i] == 0 || 7-(m_entry.prob_bit[i]) >= num_lost_intervals){
+ 									printf("Primary node %d self set my child %d to be dead\n", TOS_NODE_ID, log_payload->children[i]);
+ 									m_entry.child_dead_candidate[i] = 1;
+ 								}
+
+ 							}
+
+ 						}
+
+ 						dead_node_num=0;
+ 						// iterate child_dead_candidate array
+ 						for(i=0; i<log_payload->totalChildren; i++){
+ 							if(m_entry.child_dead_candidate[i] == 1){
+ 								dead_node_num++;
+ 							}
+
+ 						}
+
+ 						// add nodes in the network
+
+ 						if(dead_node_num >0){
+ 							// add nodes to upper level
+ 							scounter = find_scounter(TOS_NODE_ID)-1;
+							if(scounter>0 && schedule_counter[scounter] < max_schedule[scounter]){
+								printf("primary node %d add %d more backup\n", TOS_NODE_ID, dead_node_num);
+								//schedule_counter[scounter]= schedule_counter[scounter]+dead_node_num;
+								node_adjustment = schedule_counter[scounter]+dead_node_num;
+
+								if(node_adjustment > max_schedule[scounter]){
+									node_adjustment = max_schedule[scounter];
+								}
+								topo_update_log = fopen("/Users/wangwenchen/github/paper2_experiment/topo_update_log.txt", "a");
+								fprintf(topo_update_log, "%d %d\n", scounter, node_adjustment);
+								fclose(topo_update_log);
+							}
+
+ 						}
+
+ 						change_network_flag =1;
+
+ 						
+
+ 						// reset prob_bits
+						for(i=0; i<MAXCHILDREN; i++){
+							m_entry.prob_bit[i]=7;
+						}
+
+						// reset child_dead_candidate array
+						for(i=0; i<MAXCHILDREN; i++){
+							m_entry.child_dead_candidate[i] = 0;
+						}
+
+						//printf("Node %d reset prob_bits and num_intervals\n", TOS_NODE_ID);
+
+						// reset num_lost_intervals
+ 						num_lost_intervals = 0;
+
+ 					}
+
+ 					pre_delay = curr_delay;
+ 					pre_network_delay = curr_network_delay;
 
 
+ 				}else{
+
+ 					num_receving_intervals++;
+ 					pre_delay=0;
+ 				}
+
+ 				if(num_receving_intervals == REDUCE_INTERVALS){
+ 					// reduce node in the network (needs to come up with some ideas)
+
+
+ 					num_receving_intervals=0;
+ 				}
+
+ 				
+ 			}else if(TOS_NODE_ID !=0 && slot%(TOTALNODES+1)-2==ROOT1+1 && change_network_flag==1){
+
+ 				printf("HELLO!!!!!!!!!!!!!!!");
  				if(TOS_NODE_ID == ROOT1){
- 					//printf("print out root %d message receiving %d data\n", TOS_NODE_ID, log_payload->curr_num);
-					//fp=fopen("result.txt", "a");
-		              //fprintf(fp, "%d\n", log_payload->curr_num);  
-		              
-		              //fclose(fp);
+
+ 					if(read_update_file()){
+ 						generateOnlineTopo();
+ 						// remove update file
+
+		 				ret = remove("/Users/wangwenchen/github/paper2_experiment/topo_update_log.txt");
+
+						if(ret == 0) 
+						{
+						    printf("File deleted successfully\n");
+						}else 
+						{
+						    printf("Error: unable to delete the file");
+						}
+ 					}
 
  				}
-
- 				if(TOS_NODE_ID < ROOT1 && TOS_NODE_ID!=1 && TOS_NODE_ID!=2 && TOS_NODE_ID!=3 && TOS_NODE_ID!=4 && TOS_NODE_ID!=5 && TOS_NODE_ID!=6 && TOS_NODE_ID!=0){
- 					res_fp=fopen("/Users/wangwenchen/github/paper2_lp_measure/result.txt", "a");
-		    		fprintf(res_fp, "%d\t%d\t%d\t%f\n", TOS_NODE_ID, receiving_num, totalChildren, (float)receiving_num/(float)totalChildren);         
-		    		fclose(res_fp);
-
-		    		receiving_num=0;
- 				}
-
  				
+ 				change_network_flag=0;
+				//avg_prob = 0;
+				//num_intervals = 0;
 
-		    	/*rev_fp=fopen("rev.txt", "a");
-		    	fprintf(rev_fp, "%d\t%d\n", TOS_NODE_ID, rev_counter);
-		    	fclose(rev_fp);
- 				
- 				if(TOS_NODE_ID == ROOT2){
- 					send_fp=fopen("send.txt", "a");
-		    		fprintf(send_fp, "###################\n");         
-		    		fclose(send_fp);
 
-		    		rev_fp=fopen("rev.txt", "a");
-		    		fprintf(rev_fp, "###################\n");
-		    		fclose(rev_fp);
+ 			}else if(TOS_NODE_ID == ROOT1 && slot%(TOTALNODES+1)-2==ROOT1+2 ){
+ 				printf("I am going to delete received_situation.txt file!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+ 				ret = remove("/Users/wangwenchen/github/paper2_experiment/received_situation.txt");
 
-		    		//delay_fp=fopen("delay.txt", "a");;
-		    		//fprintf(delay_fp, "###################\n");
-		    		//fclose(delay_fp);
-
- 				}*/
+				if(ret == 0) 
+				{
+				    printf("received_situation.txt File deleted successfully");
+				}else 
+				{
+				    printf("Error: received_situation.txt unable to delete the file");
+				}
 
  			}
+
 
 
  		}
@@ -573,7 +743,7 @@ implementation {
            
            
            if(isChild >= 1){
-           	  receiving_num += 1;
+           	  //receiving_num += 1;
 
            	  //printf("RECEIVE CHILDREN: %u->%u, SLOT:%u (time: %s), channel: %u\n", rcmr->source,TOS_NODE_ID, call SlotterControl.getSlot(), sim_time_string(), call CC2420Config.getChannel());
 
@@ -582,7 +752,7 @@ implementation {
            	  	m_entry.prob_bit[isChild-1] += 1;
            	  }
 
-           	  rev_counter++;
+           	  //rev_counter++;
 
               //printf("node %d found child %d\n", (TOS_NODE_ID%500), rcmr->source);
               if(log_payload->i_am_primary==1){
@@ -593,18 +763,18 @@ implementation {
                   
                  
                   if(rcmr->self_data1>0){
-                    //printf("primary parent %d merge child self data %d message\n", (TOS_NODE_ID%500), rcmr->source);
+                    printf("primary parent %d merge child self data %d message\n", (TOS_NODE_ID%500), rcmr->source);
                     log_payload->merged_index[log_payload->curr_num] = rcmr->source;
                     log_payload->merged_data[log_payload->curr_num] = rcmr->self_data1;
 
                     if(TOS_NODE_ID == ROOT1){
-                    		//printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
+                    		printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
                     	if(rcmr->source>0 && rcmr->source <= NUM_MEASUREMENTS){
                     		res_list[rcmr->source-1] = rcmr->source; 
                     		delay_list[rcmr->source-1] = find_delay(call SlotterControl.getSlot() % (TOTALNODES+1));
-                    		//printf("1----res_list: %d\n", res_list[rcmr->source-1]);
+                    		printf("1----res_list: %d\n", res_list[rcmr->source-1]);
                     		//delay_fp=fopen("delay.txt", "a");
-                    		//printf("1----%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
+                    		printf("1----%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
 						    //fprintf(delay_fp, "%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());  
 						              
 						    //fclose(delay_fp);
@@ -619,7 +789,7 @@ implementation {
                   
                   
                   if(rcmr->curr_num >0){
-                    //printf("primary parent %d merge child %d message\n", (TOS_NODE_ID%500), rcmr->source);
+                    printf("primary parent %d merge child %d message\n", (TOS_NODE_ID%500), rcmr->source);
                     for(i=0; i<rcmr->curr_num; i++){
                       log_payload->merged_index[log_payload->curr_num]=rcmr->merged_index[i];
                       log_payload->merged_data[log_payload->curr_num] = rcmr->merged_data[i];
@@ -628,7 +798,7 @@ implementation {
                       if(TOS_NODE_ID == ROOT1){
 
                       	
-                      	//printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
+                      	printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
                       	if(rcmr->merged_index[i]>0 && rcmr->merged_index[i] <= NUM_MEASUREMENTS){
                       		res_list[rcmr->merged_index[i]-1] = rcmr->merged_index[i]; 
                       		//printf("2----res_list: %d\n", res_list[rcmr->merged_index[i]-1]);
@@ -661,15 +831,15 @@ implementation {
                   
                   
                   if(rcmr->curr_num >0){
-                    //printf("neighbor number of data: %d saved data start: %d\n", rcmr->curr_num, m_entry.saved_data[isChild-1].curr_num);
+                    printf("neighbor number of data: %d saved data start: %d\n", rcmr->curr_num, m_entry.saved_data[isChild-1].curr_num);
                     for(i=0; i<rcmr->curr_num; i++){
-                      //printf("backup parent %d save child %d message\n", (TOS_NODE_ID%500), rcmr->source);
-                      //printf("saved index: %d, saved data: %d\n", rcmr->merged_index[i], rcmr->merged_data[i]);
+                      printf("backup parent %d save child %d message\n", (TOS_NODE_ID%500), rcmr->source);
+                      printf("saved index: %d, saved data: %d\n", rcmr->merged_index[i], rcmr->merged_data[i]);
                       m_entry.saved_data[isChild-1].merged_data[i] = rcmr->merged_data[i];
                       m_entry.saved_data[isChild-1].merged_index[i] = rcmr->merged_index[i];
                       m_entry.saved_data[isChild-1].curr_num+=1;
                     }
-                    //printf("merged %d data\n", m_entry.saved_data[isChild-1].curr_num);
+                    printf("merged %d data\n", m_entry.saved_data[isChild-1].curr_num);
                   }
                   
               }
@@ -690,7 +860,25 @@ implementation {
            }else if(isSibling >=1){
            	   //printf("RECEIVE SIBLING: %u->%u, SLOT:%u (time: %s), channel: %u\n", rcmr->source,TOS_NODE_ID, call SlotterControl.getSlot(), sim_time_string(), call CC2420Config.getChannel());
 
-           	  rev_counter++;
+           	   // receive a message from a sibling
+           	   
+
+           	   // do fault detection, check whether they receiving their common child messages
+           	   if(is_primary==1){
+           	   		printf("node %d receive sibling message\n", TOS_NODE_ID);
+           	   		for(i=0; i<log_payload->totalChildren; i++){
+           	   			//avg_prob = avg_prob +rcmr->my_children_prob_bit[i];
+           	   			//printf("Primary %d Add sibling %d prob bit: %d\n", TOS_NODE_ID, rcmr->source, rcmr->my_children_prob_bit[i]);
+
+           	   			if(rcmr->my_children_prob_bit[i] <7 && m_entry.prob_bit[i] <7 && rcmr->my_children_prob_bit[i]==m_entry.prob_bit[i]){
+           	   				m_entry.child_dead_candidate[i]=1;
+           	   			}else{
+           	   				m_entry.child_dead_candidate[i]=0;
+           	   			}
+           	   		}
+           	   }
+
+           	  //rev_counter++;
 
               // self position 
               // all the children are common children
@@ -757,17 +945,6 @@ implementation {
                               }
                             }
 
-                            /*if(TOS_NODE_ID == ROOT1){
-
-							      printf("setTCPMSG 2: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
-							      call SimMote.setTcpMsg(ROOT1, res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
-
-							      // reset res_list
-							       for(i=0; i<NUM_MEASUREMENTS; i++){
-							       		res_list[i]=0;
-							       }
-
-			       			}*/
                             
                           }
                       }
@@ -783,11 +960,12 @@ implementation {
               }
               
               
+
            }
 
       
 
-      
+        
 
 		signal Receive.receive(msg, payload, len);
 	}	
@@ -854,7 +1032,7 @@ implementation {
     	
 	   	//ssize_t read;
 
-	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_lp_measure/topology.txt", "r");
+	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_experiment/topology.txt", "r");
 	   	if (topo_fp == NULL)
 	       exit(EXIT_FAILURE);
 
@@ -929,6 +1107,7 @@ implementation {
 
     }
 
+
     void reset_parameters(){
     	slotSize = 10 * 32;     //10ms
 		
@@ -956,6 +1135,8 @@ implementation {
        	for(i=0; i<NUM_MEASUREMENTS; i++){
        		res_list[i]=0;
        	}
+
+       	measurements_received=0;
 
        	//printf("CURRNODES: %d\n", CURRNODES);
 
@@ -985,7 +1166,6 @@ implementation {
 					if(i!=0){
 						log_payload->totalChildren=up_schedule[i-1][0];
 						totalChildren=log_payload->totalChildren;
-						//printf("Node %d totalChildren: %d\n", totalChildren);
 						for(k=1; k<=up_schedule[i-1][0]; k++){
 							log_payload->children[k-1]=up_schedule[i-1][k];
 							//printf("Node %d children %d\n", (TOS_NODE_ID%500), log_payload->children[k-1]);
@@ -1066,7 +1246,7 @@ implementation {
 
    		
 
-    	   topo_fp = fopen("/Users/wangwenchen/github/paper2_lp_measure/topology.txt", "r");
+    	   topo_fp = fopen("/Users/wangwenchen/github/paper2_experiment/topology.txt", "r");
 
 		   if (topo_fp == NULL)
 		       exit(EXIT_FAILURE);
@@ -1143,4 +1323,154 @@ implementation {
 		   fclose(topo_fp);
 
     }
+
+    int find_scounter(int primary_node){
+    	if(primary_node == 1){
+    		return 0;
+    	}else if(primary_node == 7){
+    		return 1;
+    	}else if(primary_node == 14){
+    		return 2;
+    	}else if(primary_node == 18){
+    		return 3;
+    	}else if(primary_node == 22){
+    		return 4;
+    	}else if(primary_node == 26){
+    		return 5;
+    	}else if(primary_node == 30){
+    		return 6;
+    	}else if(primary_node == 34){
+    		return 7;
+    	}else if(primary_node == 38){
+    		return 8;
+    	}else if(primary_node == 42){
+    		return 9;
+    	}else if(primary_node == 46){
+    		return 10;
+    	}else if(primary_node == 50){
+    		return 11;
+    	}
+    	return -1;
+    }
+
+	void generateOnlineTopo(){
+
+		int counter;
+
+		int i, j;
+
+		FILE *fp_new_topo;
+
+		int total_curr_nodes=0;
+
+		fp_new_topo = fopen("/Users/wangwenchen/github/paper2_experiment/topology.txt", "w");
+
+		for(i=0; i<12; i++){
+			//printf("Line %d, schedule_counter: %d\n", i, schedule_counter[i]);
+			//total_curr_nodes += schedule_counter[i];
+
+			for(j=0; j<schedule_counter[i]; j++){
+				total_curr_nodes++;
+				fprintf(fp_new_topo, "%d", total_curr_nodes);
+
+				if(i!=11){
+					fprintf(fp_new_topo, " ");
+				}
+			}
+
+		}
+
+		fprintf(fp_new_topo, "\n");
+
+		for(i=0; i<12; i++){
+			counter = starter[i];
+			for(j=0; j<schedule_counter[i]; j++){
+				fprintf(fp_new_topo, "%d", counter);
+				if(j!=schedule_counter[i]-1){
+					fprintf(fp_new_topo, " ");
+				}
+				counter++;
+			}
+			//topo << "\n";
+			fprintf(fp_new_topo, "\n");
+		}
+
+		fclose(fp_new_topo);
+	}
+
+	int read_update_file(){
+		// read topo_update_log.txt file and generate new network topology by ROOT
+		FILE * topo_fp;
+	   	char * line = NULL;
+	   	size_t len = 0;
+	   	ssize_t read;
+	   	int i;
+	   	char *token;
+	   	int line_counter=0;
+	   
+	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_experiment/topo_update_log.txt", "r");
+	  	if (topo_fp == NULL)
+	       	return 0;
+
+	   	
+
+
+	  	while ((read = getline(&line, &len, topo_fp)) != -1) {
+	       	printf("Retrieved line of length %zu :\n", read);
+	       	printf("%s", line);
+
+	       	/* get the first token */
+	       	token = strtok(line, " ");
+	       	printf("first token: %s\n", token);
+
+	       	schedule_counter[atoi(token)] = atoi(token = strtok(NULL, " "));
+	       
+	  	}
+
+	  	for(i=0; i<12; i++){
+	    	printf("new scheduler counter: %d\n", schedule_counter[i]);
+
+	  	}
+
+	  	fclose(topo_fp);
+	  	return 1;
+
+	}
+
+	int read_rev_file(){
+		// read topo_update_log.txt file and generate new network topology by ROOT
+		FILE * topo_fp;
+	   	char * line = NULL;
+	   	size_t len = 0;
+	   	ssize_t read;
+	   	int i;
+	   	char *token;
+	   	int line_counter=0;
+	   
+	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_experiment/received_situation.txt", "r");
+	  	if (topo_fp == NULL){
+	  		printf("Node %d No file???\n", TOS_NODE_ID);
+	       	return 0;
+	    }
+
+	   	getline(&line, &len, topo_fp);
+
+	   	token = strtok(line, " ");
+
+	   	measurements_received = atoi(token);
+	   	printf("Node %d measuremnt received: %d\n", TOS_NODE_ID, measurements_received);
+
+	   	token = strtok(NULL, " ");
+	   	curr_network_delay= atof(token);
+
+	   	printf("token:%s", token);
+
+	   	printf("Node %d network delay: %f\n", TOS_NODE_ID, curr_network_delay);
+
+	   	fclose(topo_fp);
+
+	  	return 1;
+
+	}
+
 }

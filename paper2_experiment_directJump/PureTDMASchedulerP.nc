@@ -55,10 +55,14 @@ implementation {
 		MAXCHILDREN = 7,
 		TOTALNODES=55,
 		NUM_MEASUREMENTS=9,
-		SAMPLE_TIMES=50,
+		LP_SAMPLE_TIMES=20,
+		TOPO_CHANGE_NODE_THRESHOLD=1,
+		TOPO_SAMPLE_TIMES=5,
 		ROOT1=50,
-		//MAXCHILDPARENTS=11,
-		
+		ADD_THRESHOLD=20,
+		REDUCE_THRESHOLD=5,
+		MIN_TOTALNODES = 20,
+		BACKLEVELS = 7,
 	};
 
 	typedef nx_struct logentry_t{
@@ -68,6 +72,7 @@ implementation {
     	nx_uint8_t ONE prob_bit[MAXCHILDREN];
     	nx_uint8_t len;
     	message_t msg; 
+    	nx_uint8_t avg_prob; // record child reception
   	}logentry_t;
 
 
@@ -87,6 +92,7 @@ implementation {
 
   	uint8_t flag = 0;
 
+  	uint8_t increment=1;
   	
   	uint8_t MAXLEVELNODE = 0;
 
@@ -102,13 +108,15 @@ implementation {
 
   	FILE * topo_fp;
 
+  	uint8_t starter[12]={1, 7, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50};
+
   	uint8_t res_list[NUM_MEASUREMENTS] = {0, 0, 0, 0, 0, 0, 0, 0, 0}; // 9 sensor results for root nodes
 
   	uint8_t delay_list[NUM_MEASUREMENTS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-  	
-
 
   	uint8_t send_counter=0;
+
+  	uint8_t is_primary=0;
 
   	uint8_t rev_counter=0;
 
@@ -127,13 +135,41 @@ implementation {
 
 	uint8_t schedule_counter[12];
 
+	//uint8_t node_adjustment=0;  // 0: no adjustment; 1: add; 2:reduce
+
 	uint8_t up_schedule[12][12];
+
+	uint8_t max_schedule[12]={6, 7, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1};
+
+	//uint8_t curr_schedule_counter[12];
+
+	uint8_t avg_prob=0;
+
+	//uint8_t avg_lp_pre=0;
+
+	uint8_t old_opt=0;
+
+	uint8_t new_opt=0;
 
 	uint8_t node_list[50];
 
+	uint8_t opt_node_list[32] = {20, 20, 20, 20, 22, 24, 25, 26, 27, 27, 29, 29, 29, 30, 30, 30, 30, 31, 33, 34, 35, 36, 37, 37, 39, 40, 40, 41, 44, 46, 47, 50};
+
+	uint8_t start_change_topo=0;
+
 	uint8_t schedule_len = 0;
 
-	uint8_t num_intervals = 0;
+	uint8_t lp_intervals = 0;
+
+	uint8_t topo_intervals=0;
+
+	uint8_t i_am_alive=0;
+
+	uint8_t child_flag=0; // child_flag for child reception, child_flag=0 -> no child message is received, child_flag=1 -> at least one child message is received
+
+	uint8_t curr_total_samples = 0;
+
+	uint8_t curr_children_sample[MAXCHILDREN] = {0, 0, 0, 0, 0, 0, 0};
 
 	uint32_t superframe_length = 55; //Real superframe length + 1, to make sure we slot 54 after "%, the mod" processing
 	
@@ -147,6 +183,18 @@ implementation {
 	void generateSchedule();
 
 	int find_delay(int node);
+
+	int find_scounter(int primary_node);
+
+	void generateOnlineTopo();
+
+	int read_update_file();
+
+	void generateUpTopoFile(int min_node, int min_k);
+	void generateDownTopoFile(int min_node, int min_k);
+	void generateRandomTopoFile(int min_node, int min_k, int linkErrorSeed);
+
+	int exist_random(int *random_backups, int random);
 	
 	command error_t Init.init() {		
 		//printf("hello!!!!\n");
@@ -171,9 +219,7 @@ implementation {
 
 		readTopoFile();
 
-
 		up_schedule[schedule_len][MAXLEVELNODE+1];
-
 
 		generateSchedule();
 
@@ -191,29 +237,42 @@ implementation {
 
 		}
 
+		m_entry.avg_prob=0;
+
+		child_flag=0;
+
 		for(i=0; i<MAXCHILDREN; i++){
-			m_entry.prob_bit[i] = 7;
+			m_entry.prob_bit[i] = 0;
 		}
+
+		log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
+
+		log_payload->totalChildren=0;
+		log_payload->totalSiblings=0;
+		log_payload->totalParents=0;
 
 		for(i=0; i<schedule_len; i++){
 			for(j=1; j<=up_schedule[i][0]; j++){
 				if(TOS_NODE_ID == up_schedule[i][j]){
-					log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
+					//log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
+
+					i_am_alive = 1;
 
 					// set children list
 					if(i!=0){
 						log_payload->totalChildren=up_schedule[i-1][0];
 						totalChildren=log_payload->totalChildren;
-						//printf("Node %d totalChildren: %d\n", totalChildren);
 						for(k=1; k<=up_schedule[i-1][0]; k++){
 							log_payload->children[k-1]=up_schedule[i-1][k];
-							//printf("Node %d children %d\n", (TOS_NODE_ID%500), log_payload->children[k-1]);
+							printf("Node %d children %d\n", (TOS_NODE_ID%500), log_payload->children[k-1]);
 							log_payload->childrenReceive[k-1]=0;
 							log_payload->childrenHandle[k-1]=0;
+
+							curr_children_sample[k-1]++;
 						}
 					}else{
 						log_payload->totalChildren=0;
-						//printf("node total children: %d\n", log_payload->totalChildren);
+						printf("node total children: %d\n", log_payload->totalChildren);
 					}
 
 
@@ -240,11 +299,6 @@ implementation {
 					log_payload->curr_num=0;
 
 
-					/*if(TOS_NODE_ID == 181 || TOS_NODE_ID == 153 || TOS_NODE_ID == 152 || TOS_NODE_ID == 155 || TOS_NODE_ID == 154 
-					|| TOS_NODE_ID == 182 || TOS_NODE_ID == 253 || TOS_NODE_ID == 252 || TOS_NODE_ID==255 || TOS_NODE_ID == 254){
-						log_payload->self_data1=TOS_NODE_ID;
-
-					}*/
 					if(TOS_NODE_ID == 1 || TOS_NODE_ID == 2 || TOS_NODE_ID == 3 || TOS_NODE_ID == 4 || TOS_NODE_ID == 5 
 					|| TOS_NODE_ID == 6 || TOS_NODE_ID == 7 || TOS_NODE_ID == 8 || TOS_NODE_ID==9){
 						log_payload->self_data1=TOS_NODE_ID*10;
@@ -254,10 +308,12 @@ implementation {
 
 					if(j==1){
 						log_payload->i_am_primary=1;
+						is_primary=1;
 					}else{
 						log_payload->i_am_primary=0;
+						is_primary=0;
 					}
-					//printf("node %d i_am_primary: %d\n", (TOS_NODE_ID%500), log_payload->i_am_primary);
+					printf("node %d i_am_primary: %d, is_primary\n", (TOS_NODE_ID%500), log_payload->i_am_primary, is_primary);
 
 				}
 
@@ -319,6 +375,14 @@ implementation {
  		message_t *tmpToSend;
  		uint8_t tmpToSendLen;
  		uint8_t i;
+ 		uint8_t scounter;
+ 		//float add_reduce_counter;
+ 		FILE *topo_update_log;
+ 		int node_adjustment;
+ 		int ret;
+ 		int min_k;
+
+ 		FILE *node_change_log;
 
  		//printf("i am node %d at slot %d begining\n", TOS_NODE_ID, slot);
  		
@@ -361,7 +425,7 @@ implementation {
 	  			send_counter++;
 
 	  			
-	  			//printf("Node %d broadcast initialization messages successfully\n", (TOS_NODE_ID%500));
+	  			printf("Node %d broadcast initialization messages successfully\n", (TOS_NODE_ID%500));
 
 	  			
 				//call Init.init();
@@ -374,7 +438,7 @@ implementation {
 				reset_parameters();
 				if(TOS_NODE_ID == ROOT1){
 					for(i=0; i<NUM_MEASUREMENTS; i++){
-						//printf("res_list: %d\n", res_list[i]);
+						printf("res_list: %d\n", res_list[i]);
 
 					}
 
@@ -382,52 +446,138 @@ implementation {
 
 
  			}else if(TOS_NODE_ID!=0 && slot%(TOTALNODES+1)-1 == TOS_NODE_ID){
+ 				
+ 				if(i_am_alive){
+ 					lp_intervals++;
+
+ 				}
+ 				
+
+ 				if(start_change_topo == 1){
+ 					topo_intervals++;
+ 				}
+ 				
+
+ 				
 
  				// means I already finished receiving all children messages
-              	if(TOS_NODE_ID <= ROOT1 && TOS_NODE_ID!=1 && TOS_NODE_ID!=2 && TOS_NODE_ID!=3 && TOS_NODE_ID!=4 && TOS_NODE_ID!=5 && TOS_NODE_ID!=6){
 
+ 				//printf("hello i am node %d\n", TOS_NODE_ID);
+
+              	if(TOS_NODE_ID <= ROOT1 && TOS_NODE_ID!=1 && TOS_NODE_ID!=2 && TOS_NODE_ID!=3 && TOS_NODE_ID!=4 && TOS_NODE_ID!=5 && TOS_NODE_ID!=6){
+              		printf("Node %d totalChildren: %d\n", TOS_NODE_ID, log_payload->totalChildren);
               		for(i=0; i<log_payload->totalChildren; i++){
               			//printf("node %d payload children receive: %d\n", TOS_NODE_ID, log_payload->childrenReceive[i]);
-              			if(log_payload->childrenReceive[i] == 0 && m_entry.prob_bit[i] >0){
-              				m_entry.prob_bit[i] --;
+              			if(log_payload->childrenReceive[i] == 0){
+              				m_entry.prob_bit[i] ++;
+              				//printf("Node %d didn't receive child %d message\n", TOS_NODE_ID, log_payload->children[i]);
 
               			}
 
-              			//printf("node %d children prob_bit: %d\n", TOS_NODE_ID, m_entry.prob_bit[i]);
+              			printf("node %d children prob_bit: %d\n", TOS_NODE_ID, m_entry.prob_bit[i]);
 
               		}
 
               	}
 
-              	num_intervals++;
+              	
 
-              	if(num_intervals == SAMPLE_TIMES){
+              	if(lp_intervals == LP_SAMPLE_TIMES && log_payload->totalChildren >0 && TOS_NODE_ID >6){
 
-					// add nodes according to prob_bits
+              		log_payload->able_to_send_lp = 1;
 
-					// reset prob_bits
+              		for(i=0; i<log_payload->totalChildren; i++){
+
+           	   			avg_prob = avg_prob + m_entry.prob_bit[i];
+           	   			
+           	   		}
+
+           	   		//avg_prob = (float)(avg_prob*100)/(float)(log_payload->totalChildren*LP_SAMPLE_TIMES);
+
+           	   		for(i=0; i<MAXCHILDREN; i++){
+           	   			curr_total_samples = curr_total_samples + curr_children_sample[i];
+           	   			printf("%dth children current sample times: %d\n", i, curr_children_sample[i]);
+
+           	   		}
+
+           	   		printf("current total samples: %d\n", curr_total_samples);
+
+
+
+           	   		avg_prob = (float)(avg_prob*100)/(float)(curr_total_samples);
+
+           	   		printf("Node %d self average probability is: %d\n", TOS_NODE_ID, avg_prob);
+
+
+           	   		// average all received children avg_prob and itself
+
+           	   		if(TOS_NODE_ID == ROOT1){
+
+           	   			log_payload->avg_link_prob = m_entry.avg_prob/child_flag;
+
+           	   		}else if(child_flag>=1 && TOS_NODE_ID>=14){
+           	   			
+           	   			m_entry.avg_prob = m_entry.avg_prob/child_flag;
+
+           	   			printf("Node %d children total average lost is %d, child_flag is: %d\n", TOS_NODE_ID, m_entry.avg_prob, child_flag);
+
+           	   			log_payload->avg_link_prob = (avg_prob+m_entry.avg_prob)/2;
+
+           	   		}else{
+           	   			log_payload->avg_link_prob = avg_prob;
+           	   		}
+
+           	   		
+           	   		printf("Node %d current average link probability is: %d\n", TOS_NODE_ID, log_payload->avg_link_prob);
+
+           	   		// reset avg_prob and m_entry.avg_prob
+           	   		avg_prob=0;
+           	   		m_entry.avg_prob=0;
+
+           	   		// reset prob_bits
 					for(i=0; i<MAXCHILDREN; i++){
-						m_entry.prob_bit[i]=7;
+						m_entry.prob_bit[i]=0;
+						curr_children_sample[i] = 0;
 					}
-				}
+
+					printf("Node %d reset all its prob_bits\n", TOS_NODE_ID);
+
+					// reset curr_total_samples
+
+					curr_total_samples = 0;
+              	
+              	}else{
+              		log_payload->able_to_send_lp = 0;
+              	}
+
+ 				//child_flag=0;
 
  				// broadcast messages
  				call CC2420Config.setChannel(22);
   				call CC2420Config.sync();
   				call AMPacket.setDestination(&(m_entry.msg), AM_BROADCAST_ADDR);
-  				log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
-  				log_payload->source = TOS_NODE_ID;
+  				//log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
+  				//log_payload->source = TOS_NODE_ID;
+
+              	// copy prob_bit to the message
+  				/*for(i=0; i<MAXCHILDREN; i++){
+  					log_payload->my_children_prob_bit[i] = m_entry.prob_bit[i];
+  					//printf("Node %d log_payload: %d\n", TOS_NODE_ID, log_payload->my_children_prob_bit[i]);
+  				}*/
+
+  				log_payload->source= TOS_NODE_ID;
+
 	  			call SubSend.send(&(m_entry.msg), sizeof(TestNetworkMsg));
 
 	  			send_counter++;
-	  			//printf("------------------------------------------Node %d broadcast messages successfully-------------------------------\n", (TOS_NODE_ID%500));
+	  			printf("------------------------------------------Node %d broadcast messages successfully-------------------------------\n", TOS_NODE_ID);
 
 	  			if(TOS_NODE_ID == ROOT1){
-	  				  //printf("ROOT1: %d\n", ROOT1);
-				      //printf("setTCPMSG 1: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
+	  				  printf("ROOT1: %d\n", ROOT1);
+				      printf("setTCPMSG 1: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
 				      call SimMote.setTcpMsg(ROOT1, res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
 
-				      //printf("delay list: %d %d %d %d %d %d %d %d %d\n", delay_list[0], delay_list[1], delay_list[2], delay_list[3], delay_list[4], delay_list[5], delay_list[6], delay_list[7], delay_list[8]);
+				      printf("delay list: %d %d %d %d %d %d %d %d %d\n", delay_list[0], delay_list[1], delay_list[2], delay_list[3], delay_list[4], delay_list[5], delay_list[6], delay_list[7], delay_list[8]);
 
 				      delay_fp=fopen("delay.txt", "a");
 
@@ -440,48 +590,100 @@ implementation {
 		        }
 
 
- 			}else if(TOS_NODE_ID!=0 && slot%(TOTALNODES+1)-2==ROOT1){
-
+ 			}else if(TOS_NODE_ID!=0 && slot%(TOTALNODES+1)-2==ROOT1 && lp_intervals == LP_SAMPLE_TIMES){
+ 				
+ 				start_change_topo = 1;
 
  				if(TOS_NODE_ID == ROOT1){
- 					//printf("print out root %d message receiving %d data\n", TOS_NODE_ID, log_payload->curr_num);
-					//fp=fopen("result.txt", "a");
-		              //fprintf(fp, "%d\n", log_payload->curr_num);  
-		              
-		              //fclose(fp);
+ 					printf("TIME TO LP_SAMPLE_TIMES!!!!! CURRENT AVERAGE LINK PROBABILITY IS %d\n", log_payload->avg_link_prob);
+
+ 					old_opt = new_opt;
+ 					
+ 					//avg_lp_pre = log_payload->avg_link_prob;
+
+ 					new_opt = opt_node_list[log_payload->avg_link_prob+1];
+
+ 					printf("new_opt: %d, old_opt: %d\n", new_opt, old_opt);
 
  				}
 
- 				if(TOS_NODE_ID < ROOT1 && TOS_NODE_ID!=1 && TOS_NODE_ID!=2 && TOS_NODE_ID!=3 && TOS_NODE_ID!=4 && TOS_NODE_ID!=5 && TOS_NODE_ID!=6 && TOS_NODE_ID!=0){
- 					res_fp=fopen("/Users/wangwenchen/github/paper2_lp_measure/result.txt", "a");
-		    		fprintf(res_fp, "%d\t%d\t%d\t%f\n", TOS_NODE_ID, receiving_num, totalChildren, (float)receiving_num/(float)totalChildren);         
-		    		fclose(res_fp);
+ 				CURRNODES = new_opt;
 
-		    		receiving_num=0;
- 				}
+ 				// CHANGE TOPOLOGY
 
- 				
+				if(CURRNODES <29 ){
+					min_k=1;				
+				}else if(CURRNODES>=29 && CURRNODES <39){
+					min_k=2;
+				}else if(CURRNODES>=39 && CURRNODES <= 47){
+					min_k = 3;
+				}else{
+					min_k=4;
+				}
 
-		    	/*rev_fp=fopen("rev.txt", "a");
-		    	fprintf(rev_fp, "%d\t%d\n", TOS_NODE_ID, rev_counter);
-		    	fclose(rev_fp);
- 				
- 				if(TOS_NODE_ID == ROOT2){
- 					send_fp=fopen("send.txt", "a");
-		    		fprintf(send_fp, "###################\n");         
-		    		fclose(send_fp);
+				generateUpTopoFile(CURRNODES, min_k);
 
-		    		rev_fp=fopen("rev.txt", "a");
-		    		fprintf(rev_fp, "###################\n");
-		    		fclose(rev_fp);
 
-		    		//delay_fp=fopen("delay.txt", "a");;
-		    		//fprintf(delay_fp, "###################\n");
-		    		//fclose(delay_fp);
-
- 				}*/
+ 				lp_intervals = 0;
 
  			}
+
+ 			/*else if(TOS_NODE_ID ==ROOT1 && slot%(TOTALNODES+1)-2==ROOT1+1 && topo_intervals == TOPO_SAMPLE_TIMES && start_change_topo==1){
+ 				
+ 				node_change_log = fopen("/Users/wangwenchen/github/paper2_experiment/node_change_log.txt", "a");
+
+
+				if(new_opt> CURRNODES){
+					// continue multiplictive increase
+					
+					CURRNODES = increment+CURRNODES;
+					if(CURRNODES>new_opt+1){
+						CURRNODES = new_opt+1;
+					}
+
+
+
+					fprintf(node_change_log, "continue multiplictive increasing!!!!, increment: %d, CURRNODES: %d, new_opt: %d, old_opt: %d\n", increment, CURRNODES, new_opt, old_opt);
+					increment = 2*increment;
+				}else if(new_opt < CURRNODES){
+					// conservertive decrease
+					if(CURRNODES > MIN_TOTALNODES){
+						CURRNODES = CURRNODES-1;
+					}
+
+					fprintf(node_change_log, "conservertive decrease !!!!, CURRNODES:%d, new_opt: %d, old_opt: %d\n", CURRNODES, new_opt, old_opt);
+
+					increment = 1;
+
+				}else{
+					// do nothing
+					increment = 1;
+
+					fprintf(node_change_log, "reset increment, CURRNODES: %d, new_opt: %d, old_opt: %d\n", CURRNODES, new_opt, old_opt);
+				}
+
+
+				// CHANGE TOPOLOGY
+
+				if(CURRNODES <29 ){
+					min_k=1;				
+				}else if(CURRNODES>=29 && CURRNODES <39){
+					min_k=2;
+				}else if(CURRNODES>=39 && CURRNODES <= 47){
+					min_k = 3;
+				}else{
+					min_k=4;
+				}
+
+				generateUpTopoFile(CURRNODES, min_k);
+
+				fclose(node_change_log);
+
+
+				topo_intervals = 0;
+
+ 			}*/
+
 
 
  		}
@@ -577,10 +779,20 @@ implementation {
 
            	  //printf("RECEIVE CHILDREN: %u->%u, SLOT:%u (time: %s), channel: %u\n", rcmr->source,TOS_NODE_ID, call SlotterControl.getSlot(), sim_time_string(), call CC2420Config.getChannel());
 
-           	  // received child message, increase prob bit
-           	  if(m_entry.prob_bit[isChild-1] <7 ){
-           	  	m_entry.prob_bit[isChild-1] += 1;
+           	  // received child message, average the current 
+
+           	  if(lp_intervals== LP_SAMPLE_TIMES-1 && rcmr->able_to_send_lp == 1){
+
+           	  	printf("Node %d Child %d average link prob: %d\n", TOS_NODE_ID, rcmr->source, rcmr->avg_link_prob);
+           	  	m_entry.avg_prob = m_entry.avg_prob+rcmr->avg_link_prob;
+           	  	child_flag++;
+
+           	  	//curr_total_samples = curr_total_samples + rcmr->curr_sample_times;
+
+           	  	
+
            	  }
+
 
            	  rev_counter++;
 
@@ -593,18 +805,18 @@ implementation {
                   
                  
                   if(rcmr->self_data1>0){
-                    //printf("primary parent %d merge child self data %d message\n", (TOS_NODE_ID%500), rcmr->source);
+                    printf("primary parent %d merge child self data %d message\n", (TOS_NODE_ID%500), rcmr->source);
                     log_payload->merged_index[log_payload->curr_num] = rcmr->source;
                     log_payload->merged_data[log_payload->curr_num] = rcmr->self_data1;
 
                     if(TOS_NODE_ID == ROOT1){
-                    		//printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
+                    		printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
                     	if(rcmr->source>0 && rcmr->source <= NUM_MEASUREMENTS){
                     		res_list[rcmr->source-1] = rcmr->source; 
                     		delay_list[rcmr->source-1] = find_delay(call SlotterControl.getSlot() % (TOTALNODES+1));
-                    		//printf("1----res_list: %d\n", res_list[rcmr->source-1]);
+                    		printf("1----res_list: %d\n", res_list[rcmr->source-1]);
                     		//delay_fp=fopen("delay.txt", "a");
-                    		//printf("1----%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
+                    		printf("1----%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
 						    //fprintf(delay_fp, "%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());  
 						              
 						    //fclose(delay_fp);
@@ -619,7 +831,7 @@ implementation {
                   
                   
                   if(rcmr->curr_num >0){
-                    //printf("primary parent %d merge child %d message\n", (TOS_NODE_ID%500), rcmr->source);
+                    printf("primary parent %d merge child %d message\n", (TOS_NODE_ID%500), rcmr->source);
                     for(i=0; i<rcmr->curr_num; i++){
                       log_payload->merged_index[log_payload->curr_num]=rcmr->merged_index[i];
                       log_payload->merged_data[log_payload->curr_num] = rcmr->merged_data[i];
@@ -628,7 +840,7 @@ implementation {
                       if(TOS_NODE_ID == ROOT1){
 
                       	
-                      	//printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
+                      	printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
                       	if(rcmr->merged_index[i]>0 && rcmr->merged_index[i] <= NUM_MEASUREMENTS){
                       		res_list[rcmr->merged_index[i]-1] = rcmr->merged_index[i]; 
                       		//printf("2----res_list: %d\n", res_list[rcmr->merged_index[i]-1]);
@@ -661,15 +873,15 @@ implementation {
                   
                   
                   if(rcmr->curr_num >0){
-                    //printf("neighbor number of data: %d saved data start: %d\n", rcmr->curr_num, m_entry.saved_data[isChild-1].curr_num);
+                    printf("neighbor number of data: %d saved data start: %d\n", rcmr->curr_num, m_entry.saved_data[isChild-1].curr_num);
                     for(i=0; i<rcmr->curr_num; i++){
-                      //printf("backup parent %d save child %d message\n", (TOS_NODE_ID%500), rcmr->source);
-                      //printf("saved index: %d, saved data: %d\n", rcmr->merged_index[i], rcmr->merged_data[i]);
+                      printf("backup parent %d save child %d message\n", (TOS_NODE_ID%500), rcmr->source);
+                      printf("saved index: %d, saved data: %d\n", rcmr->merged_index[i], rcmr->merged_data[i]);
                       m_entry.saved_data[isChild-1].merged_data[i] = rcmr->merged_data[i];
                       m_entry.saved_data[isChild-1].merged_index[i] = rcmr->merged_index[i];
                       m_entry.saved_data[isChild-1].curr_num+=1;
                     }
-                    //printf("merged %d data\n", m_entry.saved_data[isChild-1].curr_num);
+                    printf("merged %d data\n", m_entry.saved_data[isChild-1].curr_num);
                   }
                   
               }
@@ -689,6 +901,16 @@ implementation {
            
            }else if(isSibling >=1){
            	   //printf("RECEIVE SIBLING: %u->%u, SLOT:%u (time: %s), channel: %u\n", rcmr->source,TOS_NODE_ID, call SlotterControl.getSlot(), sim_time_string(), call CC2420Config.getChannel());
+
+           	   // receive a message from a sibling
+
+           	   /*if(is_primary==1 && lp_intervals== LP_SAMPLE_TIMES-1){
+           	   		printf("node %d receive sibling message\n", TOS_NODE_ID);
+           	   		for(i=0; i<log_payload->totalChildren; i++){
+           	   			avg_prob = avg_prob +rcmr->my_children_prob_bit[i];
+           	   			
+           	   		}
+           	   }*/
 
            	  rev_counter++;
 
@@ -757,17 +979,6 @@ implementation {
                               }
                             }
 
-                            /*if(TOS_NODE_ID == ROOT1){
-
-							      printf("setTCPMSG 2: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
-							      call SimMote.setTcpMsg(ROOT1, res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
-
-							      // reset res_list
-							       for(i=0; i<NUM_MEASUREMENTS; i++){
-							       		res_list[i]=0;
-							       }
-
-			       			}*/
                             
                           }
                       }
@@ -783,11 +994,12 @@ implementation {
               }
               
               
+
            }
 
       
 
-      
+        
 
 		signal Receive.receive(msg, payload, len);
 	}	
@@ -854,7 +1066,7 @@ implementation {
     	
 	   	//ssize_t read;
 
-	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_lp_measure/topology.txt", "r");
+	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_experiment_directJump/topology.txt", "r");
 	   	if (topo_fp == NULL)
 	       exit(EXIT_FAILURE);
 
@@ -929,6 +1141,7 @@ implementation {
 
     }
 
+
     void reset_parameters(){
     	slotSize = 10 * 32;     //10ms
 		
@@ -968,6 +1181,7 @@ implementation {
 		up_schedule[schedule_len][MAXLEVELNODE+1];
 
 
+
 		generateSchedule();
 
 		for(i=0; i<MAXCHILDREN; i++){
@@ -976,21 +1190,30 @@ implementation {
 
 		}
 
+		log_payload->totalChildren=0;
+		log_payload->totalSiblings=0;
+		log_payload->totalParents=0;
+
+		child_flag=0;
+
 		for(i=0; i<schedule_len; i++){
 			for(j=1; j<=up_schedule[i][0]; j++){
 				if(TOS_NODE_ID == up_schedule[i][j]){
 					log_payload = (TestNetworkMsg*)call Send.getPayload(&m_entry.msg, sizeof(TestNetworkMsg));
+					
+					i_am_alive = 1;
 
 					// set children list
 					if(i!=0){
 						log_payload->totalChildren=up_schedule[i-1][0];
 						totalChildren=log_payload->totalChildren;
-						//printf("Node %d totalChildren: %d\n", totalChildren);
 						for(k=1; k<=up_schedule[i-1][0]; k++){
 							log_payload->children[k-1]=up_schedule[i-1][k];
 							//printf("Node %d children %d\n", (TOS_NODE_ID%500), log_payload->children[k-1]);
 							log_payload->childrenReceive[k-1]=0;
 							log_payload->childrenHandle[k-1]=0;
+
+							curr_children_sample[k-1]++;
 						}
 					}else{
 						log_payload->totalChildren=0;
@@ -1066,7 +1289,7 @@ implementation {
 
    		
 
-    	   topo_fp = fopen("/Users/wangwenchen/github/paper2_lp_measure/topology.txt", "r");
+    	   topo_fp = fopen("/Users/wangwenchen/github/paper2_experiment_directJump/topology.txt", "r");
 
 		   if (topo_fp == NULL)
 		       exit(EXIT_FAILURE);
@@ -1143,4 +1366,554 @@ implementation {
 		   fclose(topo_fp);
 
     }
+
+    int find_scounter(int primary_node){
+    	if(primary_node == 1){
+    		return 0;
+    	}else if(primary_node == 7){
+    		return 1;
+    	}else if(primary_node == 14){
+    		return 2;
+    	}else if(primary_node == 18){
+    		return 3;
+    	}else if(primary_node == 22){
+    		return 4;
+    	}else if(primary_node == 26){
+    		return 5;
+    	}else if(primary_node == 30){
+    		return 6;
+    	}else if(primary_node == 34){
+    		return 7;
+    	}else if(primary_node == 38){
+    		return 8;
+    	}else if(primary_node == 42){
+    		return 9;
+    	}else if(primary_node == 46){
+    		return 10;
+    	}else if(primary_node == 50){
+    		return 11;
+    	}
+    	return -1;
+    }
+
+	void generateOnlineTopo(){
+
+		int counter;
+
+		int i, j;
+
+		FILE *fp_new_topo;
+
+		int total_curr_nodes=0;
+
+		fp_new_topo = fopen("/Users/wangwenchen/github/paper2_experiment_directJump/topology.txt", "w");
+
+		for(i=0; i<12; i++){
+			//printf("Line %d, schedule_counter: %d\n", i, schedule_counter[i]);
+			//total_curr_nodes += schedule_counter[i];
+
+			for(j=0; j<schedule_counter[i]; j++){
+				total_curr_nodes++;
+				fprintf(fp_new_topo, "%d", total_curr_nodes);
+
+				if(i!=11){
+					fprintf(fp_new_topo, " ");
+				}
+			}
+
+		}
+
+		fprintf(fp_new_topo, "\n");
+
+		for(i=0; i<12; i++){
+			counter = starter[i];
+			for(j=0; j<schedule_counter[i]; j++){
+				fprintf(fp_new_topo, "%d", counter);
+				if(j!=schedule_counter[i]-1){
+					fprintf(fp_new_topo, " ");
+				}
+				counter++;
+			}
+			//topo << "\n";
+			fprintf(fp_new_topo, "\n");
+		}
+
+		fclose(fp_new_topo);
+	}
+
+	int read_update_file(){
+		// read topo_update_log.txt file and generate new network topology by ROOT
+		FILE * topo_fp;
+	   	char * line = NULL;
+	   	size_t len = 0;
+	   	ssize_t read;
+	   	int i;
+	   	char *token;
+	   	int line_counter=0;
+	   
+	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_experiment/topo_update_log.txt", "r");
+	  	if (topo_fp == NULL)
+	       	return 0;
+
+	   	
+
+
+	  	while ((read = getline(&line, &len, topo_fp)) != -1) {
+	       	printf("Retrieved line of length %zu :\n", read);
+	       	printf("%s", line);
+
+	       	/* get the first token */
+	       	token = strtok(line, " ");
+	       	printf("first token: %s\n", token);
+
+	       	schedule_counter[atoi(token)] = atoi(token = strtok(NULL, " "));
+	       
+	  	}
+
+	  	for(i=0; i<12; i++){
+	    	printf("new scheduler counter: %d\n", schedule_counter[i]);
+
+	  	}
+
+	  	return 1;
+
+	}
+
+	void generateUpTopoFile(int min_node, int min_k){
+
+		FILE* fp_new_topo;
+		int remain_node=0;
+		int less_level_node = 0;
+		int more_level_node = 0;
+		int node_counter=0;
+		int n;
+		int i, j;
+		int node_counter_start=22;
+		//cout << "min_node: " << min_node << endl;
+		//cout << "min_k: " << min_k << endl;
+
+		printf("min_node: %d\n", min_node);
+		printf("min_k: %d\n", min_k);
+
+		// create network initial topology
+		fp_new_topo = fopen("/Users/wangwenchen/github/paper2_experiment_directJump/topology.txt", "w");
+
+		
+
+		// write the first line
+		for(n=1; n<=min_node; n++){
+			fprintf(fp_new_topo, "%d", n);
+			//topo << n;
+			if(n!=min_node){
+
+				fprintf(fp_new_topo, " ");
+			}
+			
+		}
+
+		fprintf(fp_new_topo, "\n");
+
+		if(min_k == 1){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10\n";
+			//topo << "14\n";
+			//topo << "18\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10\n");
+			fprintf(fp_new_topo, "14\n");
+			fprintf(fp_new_topo, "18\n");
+
+			node_counter = 12;
+			remain_node = min_node - 12;
+		}else if (min_k == 2){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11\n";
+			//topo << "14 15\n";
+			//topo << "18 19\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11\n");
+			fprintf(fp_new_topo, "14 15\n");
+			fprintf(fp_new_topo, "18 19\n");
+
+			node_counter = 15;
+			remain_node = min_node - 15;
+
+		}else if(min_k == 3){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11 12\n";
+			//topo << "14 15 16\n";
+			//topo << "18 19 20\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11 12\n");
+			fprintf(fp_new_topo, "14 15 16\n");
+			fprintf(fp_new_topo, "18 19 20\n");
+
+			node_counter = 18;
+			remain_node = min_node - 18;
+
+
+		}else if(min_k == 4){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11 12 13\n";
+			//topo << "14 15 16 17\n";
+			//topo << "18 19 20 21\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11 12 13\n");
+			fprintf(fp_new_topo, "14 15 16 17\n");
+			fprintf(fp_new_topo, "18 19 20 21\n");
+
+			node_counter = 21;
+			remain_node = min_node - 21;
+		}
+
+		less_level_node = (remain_node-1)/BACKLEVELS;
+		more_level_node = (remain_node-1)%BACKLEVELS;
+
+
+		node_counter=0;
+		for(i=1; i<=more_level_node; i++){
+			for(j=0; j<less_level_node+1; j++){
+				//topo << node_counter+node_counter_start;
+				fprintf(fp_new_topo, "%d", node_counter+node_counter_start);
+
+				if(j!=less_level_node){
+					//topo << " ";
+					fprintf(fp_new_topo, " ");
+				}
+				node_counter++;
+				
+			}
+			//topo << "\n";
+			fprintf(fp_new_topo, "\n");
+			node_counter_start += 4;
+			node_counter=0;
+
+		}
+
+		for(i=more_level_node+1; i<=BACKLEVELS; i++){
+			for(j = 0; j<less_level_node; j++){
+				//topo << node_counter+node_counter_start;
+				fprintf(fp_new_topo, "%d", node_counter+node_counter_start);
+				if(j!=less_level_node-1){
+					//topo << " ";
+					fprintf(fp_new_topo, " ");
+				}
+				node_counter++;
+			}
+			//topo << "\n";
+			fprintf(fp_new_topo, "\n");
+			node_counter_start += 4;
+			node_counter=0;
+		}
+
+		//topo << "50";
+		//topo << "\n";
+		//topo.close();
+		fprintf(fp_new_topo, "50");
+		fclose(fp_new_topo);
+
+	}
+
+	void generateDownTopoFile(int min_node, int min_k){
+
+		FILE* fp_new_topo;
+		int remain_node=0;
+		int less_level_node = 0;
+		int more_level_node = 0;
+		int node_counter=0;
+		int n;
+		int i, j;
+		int node_counter_start=22;
+
+		//cout << "min_node: " << min_node << endl;
+		//cout << "min_k: " << min_k << endl;
+
+		printf("min_node: %d\n", min_node);
+		printf("min_k: %d\n", min_k);
+
+		// create network initial topology
+		fp_new_topo = fopen("/Users/wangwenchen/github/paper2_experiment_directJump/topology.txt", "w");
+
+		
+
+		// write the first line
+		for(n=1; n<=min_node; n++){
+			fprintf(fp_new_topo, "%d", n);
+			//topo << n;
+			if(n!=min_node){
+
+				fprintf(fp_new_topo, " ");
+			}
+			
+		}
+
+		fprintf(fp_new_topo, "\n");
+
+		if(min_k == 1){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10\n";
+			//topo << "14\n";
+			//topo << "18\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10\n");
+			fprintf(fp_new_topo, "14\n");
+			fprintf(fp_new_topo, "18\n");
+
+			node_counter = 12;
+			remain_node = min_node - 12;
+		}else if (min_k == 2){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11\n";
+			//topo << "14 15\n";
+			//topo << "18 19\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11\n");
+			fprintf(fp_new_topo, "14 15\n");
+			fprintf(fp_new_topo, "18 19\n");
+
+			node_counter = 15;
+			remain_node = min_node - 15;
+
+		}else if(min_k == 3){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11 12\n";
+			//topo << "14 15 16\n";
+			//topo << "18 19 20\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11 12\n");
+			fprintf(fp_new_topo, "14 15 16\n");
+			fprintf(fp_new_topo, "18 19 20\n");
+
+			node_counter = 18;
+			remain_node = min_node - 18;
+
+
+		}else if(min_k == 4){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11 12 13\n";
+			//topo << "14 15 16 17\n";
+			//topo << "18 19 20 21\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11 12 13\n");
+			fprintf(fp_new_topo, "14 15 16 17\n");
+			fprintf(fp_new_topo, "18 19 20 21\n");
+
+			node_counter = 21;
+			remain_node = min_node - 21;
+		}
+
+		less_level_node = (remain_node-1)/BACKLEVELS;
+		more_level_node = (remain_node-1)%BACKLEVELS;
+
+		node_counter=0;
+		for(i=1; i<=BACKLEVELS-more_level_node; i++){
+			for(j=0; j<less_level_node; j++){
+				//topo << node_counter+node_counter_start;
+				fprintf(fp_new_topo, "%d", node_counter+node_counter_start);
+
+				if(j!=less_level_node-1){
+					//topo << " ";
+					fprintf(fp_new_topo, " ");
+				}
+				node_counter++;
+				
+			}
+			//topo << "\n";
+			fprintf(fp_new_topo, "\n");
+			node_counter_start += 4;
+			node_counter=0;
+
+		}
+
+		for(i=BACKLEVELS-more_level_node+1; i<=BACKLEVELS; i++){
+			for(j = 0; j<less_level_node+1; j++){
+				//topo << node_counter+node_counter_start;
+				fprintf(fp_new_topo, "%d", node_counter+node_counter_start);
+				if(j!=less_level_node){
+					//topo << " ";
+					fprintf(fp_new_topo, " ");
+				}
+				node_counter++;
+			}
+			//topo << "\n";
+			fprintf(fp_new_topo, "\n");
+			node_counter_start += 4;
+			node_counter=0;
+		}
+
+		//topo << "50";
+		//topo << "\n";
+		//topo.close();
+		fprintf(fp_new_topo, "50");
+		fclose(fp_new_topo);
+
+	}
+
+	void generateRandomTopoFile(int min_node, int min_k, int linkErrorSeed){
+
+		FILE* fp_new_topo;
+		int remain_node=0;
+		int less_level_node = 0;
+		int more_level_node = 0;
+		int node_counter=0;
+		int n;
+		int i, j;
+		int node_counter_start=22;
+		int random_backups[BACKLEVELS] = {0, 0, 0, 0, 0, 0, 0};
+		int k=0;
+
+		//cout << "min_node: " << min_node << endl;
+		//cout << "min_k: " << min_k << endl;
+
+		printf("min_node: %d\n", min_node);
+		printf("min_k: %d\n", min_k);
+
+		// create network initial topology
+		fp_new_topo = fopen("/Users/wangwenchen/github/paper2_experiment_directJump/topology.txt", "w");
+
+		
+
+		// write the first line
+		for(n=1; n<=min_node; n++){
+			fprintf(fp_new_topo, "%d", n);
+			//topo << n;
+			if(n!=min_node){
+
+				fprintf(fp_new_topo, " ");
+			}
+			
+		}
+
+		fprintf(fp_new_topo, "\n");
+
+		if(min_k == 1){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10\n";
+			//topo << "14\n";
+			//topo << "18\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10\n");
+			fprintf(fp_new_topo, "14\n");
+			fprintf(fp_new_topo, "18\n");
+
+			node_counter = 12;
+			remain_node = min_node - 12;
+		}else if (min_k == 2){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11\n";
+			//topo << "14 15\n";
+			//topo << "18 19\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11\n");
+			fprintf(fp_new_topo, "14 15\n");
+			fprintf(fp_new_topo, "18 19\n");
+
+			node_counter = 15;
+			remain_node = min_node - 15;
+
+		}else if(min_k == 3){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11 12\n";
+			//topo << "14 15 16\n";
+			//topo << "18 19 20\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11 12\n");
+			fprintf(fp_new_topo, "14 15 16\n");
+			fprintf(fp_new_topo, "18 19 20\n");
+
+			node_counter = 18;
+			remain_node = min_node - 18;
+
+
+		}else if(min_k == 4){
+			//topo << "1 2 3 4 5 6\n";
+			//topo << "7 8 9 10 11 12 13\n";
+			//topo << "14 15 16 17\n";
+			//topo << "18 19 20 21\n";
+
+			fprintf(fp_new_topo, "1 2 3 4 5 6\n");
+			fprintf(fp_new_topo, "7 8 9 10 11 12 13\n");
+			fprintf(fp_new_topo, "14 15 16 17\n");
+			fprintf(fp_new_topo, "18 19 20 21\n");
+
+			node_counter = 21;
+			remain_node = min_node - 21;
+		}
+
+		less_level_node = (remain_node-1)/BACKLEVELS;
+		more_level_node = (remain_node-1)%BACKLEVELS;
+
+
+		srand(linkErrorSeed);
+		
+		while(k<more_level_node){
+			int random = 1+(rand()%(int)(BACKLEVELS-1+1));
+			if(!exist_random(random_backups, random)){
+				random_backups[k] = random;
+				//cout << "random: " << random << endl;
+				printf("random_backups: %d\n", random_backups[k]);
+				k++;
+			}
+		}
+
+
+		node_counter=0;
+
+
+		for(i=1; i<=BACKLEVELS; i++){
+			if(exist_random(random_backups, i)){
+				for(j=0; j<less_level_node+1; j++){
+					
+					fprintf(fp_new_topo, "%d", node_counter+node_counter_start);
+					if(j!=less_level_node){
+						fprintf(fp_new_topo, " ");
+					}
+					node_counter++;
+				}
+				fprintf(fp_new_topo, "\n");
+				node_counter_start += 4;
+				node_counter=0;
+			}else{
+				for(j = 0; j<less_level_node; j++){
+					
+					fprintf(fp_new_topo, "%d", node_counter+node_counter_start);
+					if(j!=less_level_node-1){
+						fprintf(fp_new_topo, " ");
+					}
+					node_counter++;
+				}
+				fprintf(fp_new_topo, "\n");
+				node_counter_start += 4;
+				node_counter=0;
+			}
+
+		}
+
+		fprintf(fp_new_topo, "50");
+		fclose(fp_new_topo);
+
+	}
+
+	int exist_random(int *random_backups, int random){
+		int hasEle = 0;
+		int j=0;
+		for(j=0; j<BACKLEVELS; j++){
+			if(random_backups[j] == random){
+				hasEle = 1;
+			}
+		}
+		return hasEle;
+	}
+
 }

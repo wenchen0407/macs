@@ -56,7 +56,6 @@ implementation {
 		TOTALNODES=55,
 		NUM_MEASUREMENTS=9,
 		SAMPLE_TIMES=50,
-		ROOT1=50,
 		//MAXCHILDPARENTS=11,
 		
 	};
@@ -81,22 +80,19 @@ implementation {
   	uint8_t isSibling=0;
   	uint8_t self_pos=0;
 
-  	uint8_t receiving_num=0;
-  	uint8_t totalChildren=0;
-  	uint8_t totalParents=0;
-
   	uint8_t flag = 0;
 
   	
   	uint8_t MAXLEVELNODE = 0;
 
-	uint8_t	CURRNODES=0;
+	uint8_t	ROOT1=0;
+	uint8_t ROOT2=-1;
 
   	FILE *fp;
 
-  	FILE *res_fp;
+  	FILE *send_fp;
 
-  	//FILE *rev_fp;
+  	FILE *rev_fp;
 
   	FILE *delay_fp;
 
@@ -105,8 +101,6 @@ implementation {
   	uint8_t res_list[NUM_MEASUREMENTS] = {0, 0, 0, 0, 0, 0, 0, 0, 0}; // 9 sensor results for root nodes
 
   	uint8_t delay_list[NUM_MEASUREMENTS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-  	
-
 
   	uint8_t send_counter=0;
 
@@ -129,8 +123,6 @@ implementation {
 
 	uint8_t up_schedule[12][12];
 
-	uint8_t node_list[50];
-
 	uint8_t schedule_len = 0;
 
 	uint8_t num_intervals = 0;
@@ -145,11 +137,8 @@ implementation {
 	void reset_parameters();
 	void readTopoFile();
 	void generateSchedule();
-
-	int find_delay(int node);
 	
 	command error_t Init.init() {		
-		//printf("hello!!!!\n");
 		slotSize = 10 * 32;     //10ms
 		
 		//slotSize = 328;     //10ms		
@@ -180,8 +169,7 @@ implementation {
 		// init delay list
 
 		for(i=0; i<NUM_MEASUREMENTS; i++){
-			delay_list[i] = CURRNODES;
-			//printf("ROOT1: %d\n", ROOT1);
+			delay_list[i] = ROOT1;
 
 		}
 
@@ -203,8 +191,6 @@ implementation {
 					// set children list
 					if(i!=0){
 						log_payload->totalChildren=up_schedule[i-1][0];
-						totalChildren=log_payload->totalChildren;
-						//printf("Node %d totalChildren: %d\n", totalChildren);
 						for(k=1; k<=up_schedule[i-1][0]; k++){
 							log_payload->children[k-1]=up_schedule[i-1][k];
 							//printf("Node %d children %d\n", (TOS_NODE_ID%500), log_payload->children[k-1]);
@@ -220,7 +206,6 @@ implementation {
 					// set parent list
 					if(i<schedule_len-1){
 						log_payload->totalParents=up_schedule[i+1][0];
-						totalParents=log_payload->totalParents;
 						for(k=1; k<=up_schedule[i+1][0]; k++){
 							log_payload->parents[k-1]=up_schedule[i+1][k];
 							//printf("Node %d parent %d\n", (TOS_NODE_ID%500), log_payload->parents[k-1]);
@@ -374,7 +359,7 @@ implementation {
 				reset_parameters();
 				if(TOS_NODE_ID == ROOT1){
 					for(i=0; i<NUM_MEASUREMENTS; i++){
-						//printf("res_list: %d\n", res_list[i]);
+						printf("res_list: %d\n", res_list[i]);
 
 					}
 
@@ -420,14 +405,13 @@ implementation {
 	  			call SubSend.send(&(m_entry.msg), sizeof(TestNetworkMsg));
 
 	  			send_counter++;
-	  			//printf("------------------------------------------Node %d broadcast messages successfully-------------------------------\n", (TOS_NODE_ID%500));
+	  			//printf("Node %d broadcast messages successfully\n", (TOS_NODE_ID%500));
 
 	  			if(TOS_NODE_ID == ROOT1){
-	  				  //printf("ROOT1: %d\n", ROOT1);
-				      //printf("setTCPMSG 1: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
+				      printf("setTCPMSG 1: %d %d %d %d %d %d %d %d %d\n", res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
 				      call SimMote.setTcpMsg(ROOT1, res_list[0], res_list[1], res_list[2], res_list[3], res_list[4], res_list[5], res_list[6], res_list[7], res_list[8]);
 
-				      //printf("delay list: %d %d %d %d %d %d %d %d %d\n", delay_list[0], delay_list[1], delay_list[2], delay_list[3], delay_list[4], delay_list[5], delay_list[6], delay_list[7], delay_list[8]);
+				      printf("delay list: %d %d %d %d %d %d %d %d %d\n", delay_list[0], delay_list[1], delay_list[2], delay_list[3], delay_list[4], delay_list[5], delay_list[6], delay_list[7], delay_list[8]);
 
 				      delay_fp=fopen("delay.txt", "a");
 
@@ -452,17 +436,11 @@ implementation {
 
  				}
 
- 				if(TOS_NODE_ID < ROOT1 && TOS_NODE_ID!=1 && TOS_NODE_ID!=2 && TOS_NODE_ID!=3 && TOS_NODE_ID!=4 && TOS_NODE_ID!=5 && TOS_NODE_ID!=6 && TOS_NODE_ID!=0){
- 					res_fp=fopen("/Users/wangwenchen/github/paper2_lp_measure/result.txt", "a");
-		    		fprintf(res_fp, "%d\t%d\t%d\t%f\n", TOS_NODE_ID, receiving_num, totalChildren, (float)receiving_num/(float)totalChildren);         
-		    		fclose(res_fp);
+ 				/*send_fp=fopen("send.txt", "a");
+		    	fprintf(send_fp, "%d\t%d\n", TOS_NODE_ID, send_counter);         
+		    	fclose(send_fp);
 
-		    		receiving_num=0;
- 				}
-
- 				
-
-		    	/*rev_fp=fopen("rev.txt", "a");
+		    	rev_fp=fopen("rev.txt", "a");
 		    	fprintf(rev_fp, "%d\t%d\n", TOS_NODE_ID, rev_counter);
 		    	fclose(rev_fp);
  				
@@ -573,13 +551,11 @@ implementation {
            
            
            if(isChild >= 1){
-           	  receiving_num += 1;
-
-           	  //printf("RECEIVE CHILDREN: %u->%u, SLOT:%u (time: %s), channel: %u\n", rcmr->source,TOS_NODE_ID, call SlotterControl.getSlot(), sim_time_string(), call CC2420Config.getChannel());
 
            	  // received child message, increase prob bit
            	  if(m_entry.prob_bit[isChild-1] <7 ){
            	  	m_entry.prob_bit[isChild-1] += 1;
+
            	  }
 
            	  rev_counter++;
@@ -601,10 +577,10 @@ implementation {
                     		//printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
                     	if(rcmr->source>0 && rcmr->source <= NUM_MEASUREMENTS){
                     		res_list[rcmr->source-1] = rcmr->source; 
-                    		delay_list[rcmr->source-1] = find_delay(call SlotterControl.getSlot() % (TOTALNODES+1));
-                    		//printf("1----res_list: %d\n", res_list[rcmr->source-1]);
+                    		delay_list[rcmr->source-1] = call SlotterControl.getSlot() % (TOTALNODES+1);
+                    		printf("1----res_list: %d\n", res_list[rcmr->source-1]);
                     		//delay_fp=fopen("delay.txt", "a");
-                    		//printf("1----%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
+                    		printf("1----%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
 						    //fprintf(delay_fp, "%d %d %d %d\n", rcmr->source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());  
 						              
 						    //fclose(delay_fp);
@@ -631,10 +607,10 @@ implementation {
                       	//printf("Node %d source: %d\n", TOS_NODE_ID, rcmr->source);
                       	if(rcmr->merged_index[i]>0 && rcmr->merged_index[i] <= NUM_MEASUREMENTS){
                       		res_list[rcmr->merged_index[i]-1] = rcmr->merged_index[i]; 
-                      		//printf("2----res_list: %d\n", res_list[rcmr->merged_index[i]-1]);
-                      		delay_list[rcmr->merged_index[i]-1] = find_delay(call SlotterControl.getSlot() % (TOTALNODES+1));
+                      		printf("2----res_list: %d\n", res_list[rcmr->merged_index[i]-1]);
+                      		delay_list[rcmr->merged_index[i]-1] = call SlotterControl.getSlot() % (TOTALNODES+1);
                       		//delay_fp=fopen("delay.txt", "a");
-                      		//printf("2----%d %d %d %d\n", rcmr->merged_index[i], call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
+                      		printf("2----%d %d %d %d\n", rcmr->merged_index[i], call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
 						    //fprintf(delay_fp, "%d %d %d %d\n", rcmr->merged_index[i], call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());   
 						    //fclose(delay_fp);
 
@@ -645,6 +621,11 @@ implementation {
 
                     }
                   }
+
+                   
+
+			       
+                  
                   
               }else{
                   // save the message of the child
@@ -682,14 +663,9 @@ implementation {
               
            }else if(isParent >=1){
               // do nothing
-              //receiving_num += 1;
-              //printf("%d is parent of %d\n", rcmr->source,TOS_NODE_ID);
 
-               //printf("RECEIVE PARENT: %u->%u, SLOT:%u (time: %s), channel: %u\n", rcmr->source,TOS_NODE_ID, call SlotterControl.getSlot(), sim_time_string(), call CC2420Config.getChannel());
            
            }else if(isSibling >=1){
-           	   //printf("RECEIVE SIBLING: %u->%u, SLOT:%u (time: %s), channel: %u\n", rcmr->source,TOS_NODE_ID, call SlotterControl.getSlot(), sim_time_string(), call CC2420Config.getChannel());
-
            	  rev_counter++;
 
               // self position 
@@ -716,10 +692,10 @@ implementation {
                               if(TOS_NODE_ID == ROOT1){
                               	if(m_entry.saved_data[i].source >0 && m_entry.saved_data[i].source <= NUM_MEASUREMENTS){
                               		res_list[m_entry.saved_data[i].source-1] = m_entry.saved_data[i].source; 
-                              		delay_list[m_entry.saved_data[i].source-1] = find_delay(call SlotterControl.getSlot() % (TOTALNODES+1));
-                              		//printf("3-----res_list: %d\n", res_list[m_entry.saved_data[i].source-1]);
+                              		delay_list[m_entry.saved_data[i].source-1] = call SlotterControl.getSlot() % (TOTALNODES+1);
+                              		printf("3-----res_list: %d\n", res_list[m_entry.saved_data[i].source-1]);
                               		//delay_fp=fopen("delay.txt", "a");
-                              		//printf("3----%d %d %d %d\n", m_entry.saved_data[i].source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
+                              		printf("3----%d %d %d %d\n", m_entry.saved_data[i].source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
 					    			//fprintf(delay_fp, "%d %d %d %d\n", m_entry.saved_data[i].source, call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());  
 					              
 					    			//fclose(delay_fp);
@@ -742,9 +718,9 @@ implementation {
 
                                 	if(m_entry.saved_data[i].merged_index[j]>0 && m_entry.saved_data[i].merged_index[j] <= NUM_MEASUREMENTS){
                                 		res_list[m_entry.saved_data[i].merged_index[j]-1] = m_entry.saved_data[i].merged_index[j]; 
-                                		delay_list[m_entry.saved_data[i].merged_index[j]-1] = find_delay(call SlotterControl.getSlot() % (TOTALNODES+1));
-                                		//printf("4----res_list: %d\n", m_entry.saved_data[i].merged_index[j]);
-                              			//printf("4----%d %d %d %d\n", m_entry.saved_data[i].merged_index[j], call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
+                                		delay_list[m_entry.saved_data[i].merged_index[j]-1] = call SlotterControl.getSlot() % (TOTALNODES+1);
+                                		printf("4----res_list: %d\n", m_entry.saved_data[i].merged_index[j]);
+                              			printf("4----%d %d %d %d\n", m_entry.saved_data[i].merged_index[j], call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());
                               			//delay_fp=fopen("delay.txt", "a");
 					    				//fprintf(delay_fp, "%d %d %d %d\n", m_entry.saved_data[i].merged_index[j], call SlotterControl.getSlot() % (TOTALNODES+1), TOS_NODE_ID, call CC2420Config.getChannel());  					    
 					    				//fclose(delay_fp);
@@ -854,7 +830,7 @@ implementation {
     	
 	   	//ssize_t read;
 
-	   	topo_fp = fopen("/Users/wangwenchen/github/paper2_lp_measure/topology.txt", "r");
+	   	topo_fp = fopen("/Users/wangwenchen/wcps_apps/stepF_HX/topology.txt", "r");
 	   	if (topo_fp == NULL)
 	       exit(EXIT_FAILURE);
 
@@ -888,7 +864,7 @@ implementation {
 	       //printf("counter: %d\n", counter);
 
 	       if(line_counter==0){
-	          CURRNODES = counter;
+	          ROOT1 = counter;
 	       }else{
 	          schedule_counter[line_counter-1] = counter;
 
@@ -913,19 +889,6 @@ implementation {
 	   		free(line);
 	   }
        		
-
-    }
-
-    int find_delay(int node){
-    	uint8_t i;
-    	for(i=0; i<CURRNODES; i++){
-    		if(node_list[i] == node){
-    			return i+1;
-    		}
-
-    	}
-
-    	return CURRNODES;
 
     }
 
@@ -957,11 +920,9 @@ implementation {
        		res_list[i]=0;
        	}
 
-       	//printf("CURRNODES: %d\n", CURRNODES);
-
        	// reset res_list
        	for(i=0; i<NUM_MEASUREMENTS; i++){
-       		delay_list[i]=CURRNODES;
+       		delay_list[i]=ROOT1;
        	}
 
 
@@ -984,8 +945,6 @@ implementation {
 					// set children list
 					if(i!=0){
 						log_payload->totalChildren=up_schedule[i-1][0];
-						totalChildren=log_payload->totalChildren;
-						//printf("Node %d totalChildren: %d\n", totalChildren);
 						for(k=1; k<=up_schedule[i-1][0]; k++){
 							log_payload->children[k-1]=up_schedule[i-1][k];
 							//printf("Node %d children %d\n", (TOS_NODE_ID%500), log_payload->children[k-1]);
@@ -1001,7 +960,6 @@ implementation {
 					// set parent list
 					if(i<schedule_len-1){
 						log_payload->totalParents=up_schedule[i+1][0];
-						totalParents=log_payload->totalParents;
 						for(k=1; k<=up_schedule[i+1][0]; k++){
 							log_payload->parents[k-1]=up_schedule[i+1][k];
 							//printf("Node %d parent %d\n", (TOS_NODE_ID%500), log_payload->parents[k-1]);
@@ -1060,13 +1018,7 @@ implementation {
 
    		uint8_t i, j;
 
-   		uint8_t node_index=0;
-
-   		node_list[CURRNODES];
-
-   		
-
-    	   topo_fp = fopen("/Users/wangwenchen/github/paper2_lp_measure/topology.txt", "r");
+    	   topo_fp = fopen("/Users/wangwenchen/wcps_apps/stepF_HX/topology.txt", "r");
 
 		   if (topo_fp == NULL)
 		       exit(EXIT_FAILURE);
@@ -1109,9 +1061,6 @@ implementation {
 		            //printf("other schedule tokens: %s\n", token);
 		            up_schedule[line_counter][counter] = atoi(token);
 
-
-
-
 		            //printf("up_schedule: %d\n", up_schedule[line_counter][counter]);
 		          }
 		          
@@ -1127,11 +1076,6 @@ implementation {
 		      //printf("%d line of schedule: \n", i);
 		      for(j=1; j<=up_schedule[i][0]; j++){
 		        //printf("%d ", up_schedule[i][j]);
-
-		        node_list[node_index] = up_schedule[i][j];
-
-		        //printf("%d ", node_list[node_index]);
-		        node_index += 1;
 
 		      }
 
